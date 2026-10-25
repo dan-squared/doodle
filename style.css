@@ -47,7 +47,7 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 @keyframes di { to { opacity: 0; } }
 .screen { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; pointer-events: auto; cursor: pointer; background: rgba(246, 243, 230, .55); }
 .screen.show { display: flex; }
-.panel { text-align: center; max-width: 980px; padding: 26px 48px; background: rgba(250, 248, 238, .93); box-shadow: 6px 6px 0 rgba(26, 48, 192, .15); border: 3px solid var(--ink); border-radius: 12px 18px 10px 16px / 16px 10px 18px 12px; transform: rotate(-.6deg); }
+.panel { text-align: center; max-width: 980px; padding: 26px 48px; background: rgba(250, 248, 238, .93); box-shadow: 6px 6px 0 rgba(26, 48, 192, .15); border: 3px solid var(--ink); border-radius: 12px 18px 10px 16px / 16px 10px 18px 12px; transform: rotate(-.6deg); box-sizing: border-box; max-height: calc(100vh - 32px); overflow-y: auto; }
 .panel h1 { font-size: 92px; margin: 0; letter-spacing: 3px; line-height: 1; }
 .panel h2 { font-size: 36px; margin: 4px 0 14px; font-weight: normal; }
 .panel .cols { display: flex; gap: 46px; justify-content: center; text-align: left; font-size: 22px; line-height: 1.35; }
@@ -82,6 +82,17 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .settings input[type=checkbox] { width: 17px; height: 17px; accent-color: #1a30c0; }
 .settings b { color: var(--red); min-width: 56px; text-align: left; }
 .settings .k { opacity: .6; font-size: 17px; }
+.settings details.gyro { border-top: 1px dashed rgba(26, 48, 192, .35); padding-top: 6px; margin-top: 2px; font-size: 19px; }
+.settings details.gyro summary { cursor: pointer; list-style: none; opacity: .9; }
+.settings details.gyro summary::-webkit-details-marker { display: none; }
+.settings details.gyro summary::before { content: '+ '; opacity: .6; }
+.settings details.gyro[open] summary::before { content: '– '; }
+.settings .gyrobody { display: flex; flex-direction: column; gap: 4px; align-items: center; padding-top: 5px; }
+.settings .gyrobtns { display: flex; gap: 10px; margin-top: 2px; }
+.settings .gyrobtns button { font: inherit; font-size: 17px; color: var(--ink); background: transparent; border: 2px solid var(--ink); border-radius: 6px 8px 5px 7px; padding: 2px 12px; cursor: pointer; }
+.settings .gyrobtns button:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+.settings .gyrobtns button:disabled { opacity: .35; cursor: default; }
+.settings .gyrostatus { font-size: 16px; line-height: 1.2; opacity: .72; max-width: 560px; min-height: 18px; text-align: center; }
 .beststat { font-size: 22px; opacity: .8; margin-top: 4px; }
 /* sniper scope */
 .scope { position: absolute; inset: 0; opacity: 0; transition: opacity .1s; pointer-events: none; }

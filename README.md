@@ -17,6 +17,22 @@ python3 serve.py 8910
 
 then open http://127.0.0.1:8910. On Vercel (or any static host) just deploy the folder as is.
 
+## Gyro aiming
+
+A PS5 DualSense (or DualSense Edge) can aim with its gyroscope in Chrome or Edge. Open
+**Settings → gyro aiming**, tick **enable gyro aiming**, and pick the controller in the browser's
+device chooser. WebHID only works on `localhost` or an HTTPS page, so use `http://127.0.0.1:8910`
+rather than a plain-HTTP LAN address.
+
+The gyro is relative: turning the pad adds to the right-stick aim instead of replacing it, and the
+sensitivity slider and the two invert toggles cover different grips. **Recenter** re-learns the pad's
+resting bias — hold it still for a second. Gyro state is remembered in `localStorage`; on later visits
+the game reconnects automatically if the browser still grants access.
+
+If Steam, DS4Windows or another app has claimed the controller, close it and use **Connect
+controller** again. When WebHID holds the device open, the game reads sticks and buttons from the
+same HID reports, so the pad keeps working even if it disappears from the Gamepad API.
+
 ## Modes
 
 - **Solo**: survive the waves. Bosses every fifth wave, checkpoints unlock at wave 5, 10, 15...

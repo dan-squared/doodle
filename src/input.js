@@ -1,5 +1,6 @@
 // Unified keyboard/mouse + gamepad (PS5 DualSense / standard mapping) input.
 import { clamp } from './util.js';
+import { GyroInput } from './gyro.js';
 
 const KEYMAP = {
   KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right', ArrowUp: 'forward', ArrowDown: 'back', ArrowLeft: 'left', ArrowRight: 'right',
@@ -24,6 +25,11 @@ export class Input {
     this.pointerLocked = false; this.anyInput = false; this.lastPadButtons = [];
     this.onLockChange = null; this.onAnyInput = null; this.lastActive = performance.now();
     this.invertY = false; this.onDeviceChange = null;
+    // WebHID gyro aiming (Chrome/Edge). The module also exposes sticks/buttons
+    // from the HID reports, used only if WebHID hides the pad from the Gamepad API.
+    this.gyro = new GyroInput();
+    this.gyro.loadSettings();
+    if (this.gyro.enabled) this.gyro.autoConnect();
 
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
@@ -33,7 +39,7 @@ export class Input {
       this.anyInput = true;
     });
     window.addEventListener('keyup', (e) => { const a = KEYMAP[e.code]; if (a) this.keys[a] = false; if (!e.shiftKey) this.keys.sprint = false; });
-    document.addEventListener('visibilitychange', () => { if (document.hidden) { this.keys = {}; this.mouseBtns = {}; } });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) { this.keys = {}; this.mouseBtns = {}; this.gyro.reset(); } });
     window.addEventListener('blur', () => { this.keys = {}; this.mouseBtns = {}; });
     this.padState = {}; this.padPrev = {};
     document.addEventListener('mousemove', (e) => {
@@ -91,11 +97,14 @@ export class Input {
     // look from mouse
     let lx = -this.mx * this.mouseSens, ly = -this.my * this.mouseSens; this.mx = 0; this.my = 0;
 
-    const pad = this._getPad(); const padS = {};
+    const gamepad = this._getPad();
+    const hidPad = this.gyro ? this.gyro.pad : null;
+    const pad = gamepad || hidPad; // HID fallback if WebHID hides the pad
+    const padS = {};
+    let padActive = false;
     if (pad) {
       const dz = (v) => (Math.abs(v) < 0.14 ? 0 : (v - Math.sign(v) * 0.14) / 0.86);
       const ax = dz(pad.axes[0] || 0), ay = dz(pad.axes[1] || 0), rx = dz(pad.axes[2] || 0), ry = dz(pad.axes[3] || 0);
-      let padActive = false;
       if (Math.abs(ax) > 0 || Math.abs(ay) > 0) { mx = ax; my = -ay; padActive = true; }
       if (Math.abs(rx) > 0 || Math.abs(ry) > 0) {
         padActive = true;
@@ -111,9 +120,20 @@ export class Input {
         const pressed = b.pressed || b.value > 0.35;
         if (pressed) { s[PADMAP[idx]] = true; padS[PADMAP[idx]] = true; padActive = true; }
       }
-      if (padActive) { if (!this.usingGamepad && this.onDeviceChange) this.onDeviceChange(true); this.usingGamepad = true; this.anyInput = true; this.lastActive = performance.now(); }
-      this._pad = pad;
+      this._pad = gamepad; // vibration goes through the Gamepad API only
     } else this._pad = null;
+
+    // Gyro look: consume the degrees accumulated at the pad's report rate.
+    let gyroActive = false;
+    if (this.gyro.enabled && this.gyro.connected) {
+      const g = this.gyro.consume();
+      if (g.x || g.y) {
+        lx += g.x * Math.PI / 180;
+        ly += g.y * Math.PI / 180;
+        gyroActive = true;
+      }
+    }
+    if (padActive || gyroActive) { if (!this.usingGamepad && this.onDeviceChange) this.onDeviceChange(true); this.usingGamepad = true; this.anyInput = true; this.lastActive = performance.now(); }
     this.padPrev = this.padState; this.padState = padS;
 
     const ml = Math.hypot(mx, my); if (ml > 1) { mx /= ml; my /= ml; }
