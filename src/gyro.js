@@ -1,4 +1,4 @@
-// WebHID gyro aiming for the DualSense / DualSense Edge.
+// WebHID gyro aiming for the DualShock 4 and DualSense family.
 //
 // Chromium only (Chrome/Edge), and only in a secure context (https or localhost).
 // connect() must be called from a user gesture; autoConnect() re-opens a pad the
@@ -18,7 +18,9 @@
 // WebHID removes it from navigator.getGamepads(), the controller still works.
 
 const SONY = 0x054c;
-const PRODUCT_IDS = [0x0ce6, 0x0df2]; // DualSense, DualSense Edge
+const DUALSENSE_IDS = [0x0ce6, 0x0df2]; // DualSense, DualSense Edge
+const DUALSHOCK4_IDS = [0x05c4, 0x09cc]; // DualShock 4 v1, v2
+const PRODUCT_IDS = [...DUALSENSE_IDS, ...DUALSHOCK4_IDS];
 const FALLBACK_DPS_PER_LSB = 1 / 16.4; // ~+-2000 dps across int16
 const TS_TICK = 1 / 3e6;               // sensor timestamp unit is ~0.333 us
 const STILL_DPS = 1.5;                 // below this on every axis = "still"
@@ -27,7 +29,8 @@ const SMOOTH_LO = 5, SMOOTH_HI = 25;   // fully smooth below LO, raw above HI
 const HIST = 6;                        // ~24 ms of averaging at 250 Hz
 const PAD_STALE_MS = 450;              // ignore HID buttons if reports stop
 
-const isDS = (d) => d && d.vendorId === SONY && PRODUCT_IDS.includes(d.productId);
+const isSonyPad = (d) => d && d.vendorId === SONY && PRODUCT_IDS.includes(d.productId);
+const isDS4 = (d) => d && d.vendorId === SONY && DUALSHOCK4_IDS.includes(d.productId);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 export class GyroInput {
@@ -44,12 +47,15 @@ export class GyroInput {
     this.invertX = false;     // horizontal (yaw)
     this.invertY = false;     // vertical (pitch)
     this.connected = false;
+    this.hasMotionData = false;
     this.calibrating = false;
     this.state = this.supported ? 'idle' : 'unsupported';
     this.error = '';
     this.onchange = null;     // called on connect/disconnect/calibration changes
 
     this._dev = null;
+    this._attaching = null;
+    this._isDS4 = false;
     this._scale = [FALLBACK_DPS_PER_LSB, FALLBACK_DPS_PER_LSB, FALLBACK_DPS_PER_LSB];
     this._fbias = [0, 0, 0];  // factory gyro bias, raw counts
     this._bias = [0, 0, 0];   // residual bias, deg/s, learned at runtime
@@ -112,7 +118,7 @@ export class GyroInput {
       throw err;
     }
     if (!devices || !devices[0]) {
-      this._setState(this.connected ? 'connected' : 'idle');
+      this._setState(this.connected ? 'connected' : 'permission');
       return false;
     }
     await this._attach(devices[0]);
@@ -121,20 +127,29 @@ export class GyroInput {
 
   /** Re-opens a previously permitted pad without a prompt. Safe to call at startup. */
   async autoConnect() {
-    if (!this.supported || !this.enabled || this.connected) return false;
+    if (!this.supported) return false;
     if (!this._listening) {
       this._listening = true;
       navigator.hid.addEventListener('connect', (e) => {
-        if (isDS(e.device) && !this._dev && this.enabled) this._attach(e.device).catch(() => {});
+        if (isSonyPad(e.device) && !this._dev && this.enabled) this._attach(e.device).catch(() => {});
       });
       navigator.hid.addEventListener('disconnect', (e) => {
         if (e.device === this._dev) this._detach();
       });
     }
-    try {
-      const d = (await navigator.hid.getDevices()).find(isDS);
-      if (d) { await this._attach(d); return true; }
-    } catch { /* leave idle */ }
+    if (!this.enabled || this.connected) return this.connected;
+    let devices;
+    try { devices = await navigator.hid.getDevices(); }
+    catch (err) {
+      this._setState('error', err && err.message ? err.message : String(err));
+      return false;
+    }
+    const d = devices.find(isSonyPad);
+    if (d) {
+      try { await this._attach(d); return true; }
+      catch { return false; } // _attach already published the concrete error
+    }
+    if (this.enabled && !this.connected) this._setState('permission');
     return false;
   }
 
@@ -146,19 +161,41 @@ export class GyroInput {
 
   async _attach(d) {
     if (this._dev === d && this.connected) return;
+    if (this._attaching) {
+      if (this._attaching.device === d) return this._attaching.promise;
+      try { await this._attaching.promise; } catch { /* try the newly selected device */ }
+    }
     if (this._dev && this._dev !== d) {
       try { this._dev.removeEventListener('inputreport', this._onReport); } catch { /* ignore */ }
       try { if (this._dev.opened) await this._dev.close(); } catch { /* ignore */ }
       this._dev = null;
+      this.connected = false;
+      this.hasMotionData = false;
+      this._padSnapshot = null;
+      this._padAt = 0;
+      this._acc.yaw = this._acc.pitch = 0;
     }
+    const promise = this._attachDevice(d);
+    this._attaching = { device: d, promise };
+    try { await promise; }
+    finally { if (this._attaching && this._attaching.promise === promise) this._attaching = null; }
+  }
+
+  async _attachDevice(d) {
     this._setState('connecting');
     try {
+      this.hasMotionData = false;
       if (!d.opened) await d.open();
+      this._isDS4 = isDS4(d);
+      this._scale = [FALLBACK_DPS_PER_LSB, FALLBACK_DPS_PER_LSB, FALLBACK_DPS_PER_LSB];
+      this._fbias = [0, 0, 0];
       await this._loadCalibration(d);
       d.addEventListener('inputreport', this._onReport);
       this._dev = d;
       this._lastTs = null;
       this._hist.length = 0;
+      this._padSnapshot = null;
+      this._padAt = 0;
       this._acc.yaw = this._acc.pitch = 0;
       this._bias = [0, 0, 0];
       this._resetStill();
@@ -167,6 +204,9 @@ export class GyroInput {
       this._setState('connected');
     } catch (err) {
       try { if (d.opened) await d.close(); } catch { /* ignore */ }
+      this._dev = null;
+      this.connected = false;
+      this.hasMotionData = false;
       this._setState('error', err && err.message ? err.message : String(err));
       throw err;
     }
@@ -178,15 +218,19 @@ export class GyroInput {
     }
     this._dev = null;
     this.connected = false;
+    this.hasMotionData = false;
+    this._isDS4 = false;
     this._acc.yaw = this._acc.pitch = 0;
     this._lastTs = null;
     this._hist.length = 0;
+    this._padSnapshot = null;
+    this._padAt = 0;
     this._clearManual();
     this._setState(this.supported ? 'idle' : 'unsupported');
   }
 
-  // Feature report 0x05 is the factory IMU calibration. Reading it also switches
-  // a Bluetooth pad from the short 0x01 report to full 0x31 reports with IMU data.
+  // Feature report 0x05 carries factory IMU calibration. For Bluetooth DualSense
+  // and DualShock 4 it also enables the full report that contains IMU data.
   //
   // Chromium's receiveFeatureReport may or may not include the report ID in the
   // returned DataView, so both layouts are attempted and the one that validates
@@ -194,27 +238,40 @@ export class GyroInput {
   async _loadCalibration(d) {
     try {
       if (typeof d.receiveFeatureReport !== 'function') return false;
-      const view = await d.receiveFeatureReport(0x05);
-      return this._applyCalibration(view);
+      if (isDS4(d)) {
+        // DS4 Bluetooth uses report 0x05 and has a different axis order from
+        // the USB calibration report. Some hosts expose only USB report 0x02.
+        try {
+          const bt = await d.receiveFeatureReport(0x05);
+          if (this._applyCalibration(bt, true)) return true;
+        } catch { /* try the USB-style report */ }
+        try { return this._applyCalibration(await d.receiveFeatureReport(0x02)); }
+        catch { return false; }
+      }
+      return this._applyCalibration(await d.receiveFeatureReport(0x05));
     } catch {
       return false; // keep the fallback scale; runtime bias still handles drift
     }
   }
 
-  _applyCalibration(view) {
+  _applyCalibration(view, ds4Bluetooth = false) {
     if (!view || typeof view.getInt16 !== 'function' || view.byteLength < 21) return false;
     const parse = (base) => {
       if (view.byteLength < base + 23) return null;
       const i16 = (o) => view.getInt16(o, true);
       const bias = [i16(base + 1), i16(base + 3), i16(base + 5)];
       const speed2x = i16(base + 19) + i16(base + 21);
-      const pairs = [[base + 7, base + 9], [base + 11, base + 13], [base + 15, base + 17]];
-      const scale = pairs.map(([p, m]) => {
-        const denom = i16(p) - i16(m);
+      const pairs = ds4Bluetooth
+        ? [[base + 7, base + 13], [base + 9, base + 15], [base + 11, base + 17]]
+        : [[base + 7, base + 9], [base + 11, base + 13], [base + 15, base + 17]];
+      const scale = pairs.map(([p, m], axis) => {
+        const denom = this._isDS4
+          ? Math.abs(i16(p) - bias[axis]) + Math.abs(i16(m) - bias[axis])
+          : i16(p) - i16(m);
         return denom ? speed2x / denom : 0;
       });
       // Plausibility checks mirror SDL's: a sane gyro scale is ~1/16.4 dps per count.
-      if (bias.some((b) => Math.abs(b) > 1024)) return null;
+      if (bias.some((b) => Math.abs(b) > (this._isDS4 ? 8192 : 1024))) return null;
       if (scale.some((s) => !(s > 0.02 && s < 0.2))) return null;
       return { bias, scale };
     };
@@ -233,10 +290,11 @@ export class GyroInput {
   /** Hold the pad still for ~1 s. Look output pauses while it samples bias. */
   recenter() {
     if (!this.connected) return false;
-    this._manual = { t: 0, n: 0, s: [0, 0, 0] };
+    this._manual = { t: 0, s: [0, 0, 0] };
     this.calibrating = true;
     this._hist.length = 0;
     this._acc.yaw = this._acc.pitch = 0;
+    this._resetStill();
     clearTimeout(this._calTimer);
     // Reports can stop (pad sleeps); finish with whatever was collected.
     this._calTimer = setTimeout(() => this._finishManual(), 1600);
@@ -247,7 +305,7 @@ export class GyroInput {
   _finishManual() {
     if (!this._manual) return;
     const m = this._manual;
-    if (m.n > 0) this._bias = [m.s[0] / m.n, m.s[1] / m.n, m.s[2] / m.n];
+    if (m.t > 0) this._bias = [m.s[0] / m.t, m.s[1] / m.t, m.s[2] / m.t];
     this._clearManual();
     this._emit();
   }
@@ -259,18 +317,29 @@ export class GyroInput {
     this.calibrating = false;
   }
 
-  _resetStill() { this._still = { t: 0, n: 0, s: [0, 0, 0] }; }
+  _resetStill() { this._still = { t: 0, s: [0, 0, 0] }; }
 
   // ---- report handling ----
   _onReport(e) {
+    if (typeof document !== 'undefined' && document.hidden) {
+      this._lastTs = null;
+      this._hist.length = 0;
+      return;
+    }
     const { reportId, data } = e;
     let layout = null;
-    // USB 0x01: 63 data bytes (64 minus the report ID), IMU at 15.
-    // Bluetooth 0x31: 77 bytes, one padding byte, IMU at 16.
-    // WebHID's event.data never includes the report ID.
-    if (reportId === 0x01 && data.byteLength >= 63) {
+    // WebHID's event.data excludes the report ID. DS4 Bluetooth 0x11 has a
+    // two-byte transport header, then the common controls and 16-bit IMU clock.
+    if (this._isDS4 && reportId === 0x11 && data.byteLength >= 77) {
+      layout = { gyro: 14, ts: 11, tsBytes: 2, tsTick: 16 / 3e6, sticks: 2, trig: 9, b0: 6, b1: 7, b2: 8 };
+    } else if (this._isDS4 && reportId === 0x01 && data.byteLength >= 63) {
+      // DS4 USB full report: controls start immediately after report ID.
+      layout = { gyro: 12, ts: 9, tsBytes: 2, tsTick: 16 / 3e6, sticks: 0, trig: 7, b0: 4, b1: 5, b2: 6 };
+    } else if (!this._isDS4 && reportId === 0x01 && data.byteLength >= 63) {
+      // DualSense USB 0x01: 63 data bytes (64 minus the report ID), IMU at 15.
       layout = { gyro: 15, ts: 27, sticks: 0, trig: 4, b0: 7, b1: 8, b2: 9 };
-    } else if (reportId === 0x31 && data.byteLength >= 42) {
+    } else if (!this._isDS4 && reportId === 0x31 && data.byteLength >= 42) {
+      // DualSense Bluetooth 0x31: one padding byte before the IMU at 16.
       layout = { gyro: 16, ts: 28, sticks: 1, trig: 5, b0: 8, b1: 9, b2: 10 };
     } else {
       return; // 10-byte Bluetooth simple report: no IMU, no full pad
@@ -278,16 +347,22 @@ export class GyroInput {
 
     this._readPad(data, layout);
 
-    if (data.byteLength < layout.ts + 4) return;
+    if (data.byteLength < layout.ts + (layout.tsBytes || 4)) return;
     const gx = data.getInt16(layout.gyro, true);      // pitch
     const gy = data.getInt16(layout.gyro + 2, true);  // yaw
     const gz = data.getInt16(layout.gyro + 4, true);  // roll
-    const ts = data.getUint32(layout.ts, true);
+    const ts = layout.tsBytes === 2 ? data.getUint16(layout.ts, true) : data.getUint32(layout.ts, true);
+    if (!this.hasMotionData) {
+      this.hasMotionData = true;
+      this._emit();
+    }
 
-    let dt = 0.004;
+    let dt = 0;
     if (this._lastTs !== null) {
-      const ticks = (ts - this._lastTs) >>> 0; // unsigned handles the 32-bit wrap
-      const d = ticks * TS_TICK;
+      // DS4's clock wraps at 16 bits and advances in 5.33 us ticks; DualSense
+      // uses a 32-bit clock in 0.333 us ticks.
+      const ticks = layout.tsBytes === 2 ? (ts - this._lastTs) & 0xffff : (ts - this._lastTs) >>> 0;
+      const d = ticks * (layout.tsTick || TS_TICK);
       if (ticks === 0) dt = 0;
       else if (d > 0 && d < 0.05) dt = d;
       else dt = 0; // a long gap (tab hidden / pad slept): don't guess a huge turn
@@ -343,6 +418,7 @@ export class GyroInput {
 
   /** Exposed for tests: consume one IMU sample. */
   _process(gx, gy, gz, dt) {
+    if (!(dt > 0) || !Number.isFinite(dt)) return;
     const f = this._fbias, s = this._scale, b = this._bias;
     const u = [
       (gx - f[0]) * s[0], // pitch, deg/s
@@ -353,8 +429,8 @@ export class GyroInput {
     // Manual recenter: average ~1 s of still samples and adopt the result.
     if (this._manual) {
       const m = this._manual;
-      m.t += dt; m.n++;
-      m.s[0] += u[0]; m.s[1] += u[1]; m.s[2] += u[2];
+      m.t += dt;
+      m.s[0] += u[0] * dt; m.s[1] += u[1] * dt; m.s[2] += u[2] * dt;
       if (m.t >= 1) this._finishManual();
       return;
     }
@@ -364,13 +440,13 @@ export class GyroInput {
     // Continuous auto-calibration while the pad sits still.
     if (Math.abs(pitch) < STILL_DPS && Math.abs(yaw) < STILL_DPS && Math.abs(roll) < STILL_DPS) {
       const st = this._still;
-      st.t += dt; st.n++;
-      st.s[0] += u[0]; st.s[1] += u[1]; st.s[2] += u[2];
+      st.t += dt;
+      st.s[0] += u[0] * dt; st.s[1] += u[1] * dt; st.s[2] += u[2] * dt;
       if (st.t >= 0.5) {
-        for (let i = 0; i < 3; i++) b[i] += (st.s[i] / st.n - b[i]) * 0.3;
+        for (let i = 0; i < 3; i++) b[i] += (st.s[i] / st.t - b[i]) * 0.3;
         this._resetStill();
       }
-    } else if (this._still.n) {
+    } else if (this._still.t > 0) {
       this._resetStill();
     }
 
@@ -418,6 +494,7 @@ export class GyroInput {
     this._acc.yaw = this._acc.pitch = 0;
     this._lastTs = null;
     this._hist.length = 0;
+    this.hasMotionData = false;
     this._resetStill();
     if (this._manual) {
       this._clearManual();

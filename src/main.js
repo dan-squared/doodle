@@ -599,11 +599,18 @@ function setStatus(t) { lobby.status = t; const el = hud.el.panel.querySelector(
 function gyroStatus(g) {
   if (!g.supported) return 'WebHID is unavailable here · use Chrome or Edge on localhost or HTTPS';
   if (g.state === 'connecting') return 'waiting for a controller…';
-  if (g.state === 'error') return 'connection failed: ' + (g.error || 'unknown error') + ' · close Steam or DS4Windows if it holds the pad';
+  if (g.state === 'error') return 'Gyro access failed. Turn gyro off and on, then choose the controller in the browser prompt. If access still fails, close Steam or DS4Windows if it holds the controller.';
   if (g.connected && g.calibrating) return 'hold the controller still…';
-  if (g.connected) return 'connected · gyro ready';
-  if (g.enabled) return 'controller not connected · click connect controller';
-  return 'gyro is off';
+  if (g.connected && g.enabled && !g.hasMotionData) return 'controller connected · waiting for gyro reports';
+  if (g.connected && g.enabled) return 'controller connected · gyro ready';
+  if (g.connected) return 'controller connected · turn on gyro aiming to use gyro';
+  if (g.state === 'permission') return input.controllerConnected
+    ? 'Controller works for movement. Turn gyro off and on to open the browser permission prompt.'
+    : 'No gyro controller permission yet. Turn gyro off and on after connecting a PS4 or PS5 controller.';
+  if (g.enabled && input.controllerConnected) return 'Controller works for movement. Select it in the browser permission prompt for gyro.';
+  if (g.enabled) return 'Connect a DualShock 4 or DualSense. The browser will ask once before gyro access.';
+  if (input.controllerConnected) return 'Controller connected for movement · turn on gyro aiming to use gyro';
+  return 'Connect a DualShock 4 or DualSense, then turn on gyro aiming';
 }
 function settingsHTML() {
   const g = input.gyro;
@@ -612,13 +619,13 @@ function settingsHTML() {
     <label><input type="checkbox" id="setInv" ${settings.invert ? 'checked' : ''}> invert vertical look</label>
     <label><input type="checkbox" id="setMus" ${musicWanted ? 'checked' : ''}> music <span class="k">(M)</span></label>
     <details class="gyro" id="gyroBox">
-      <summary>gyro aiming${g.connected ? ' · connected' : g.enabled ? ' · on' : ' (DualSense)'}</summary>
+      <summary>gyro aiming${g.connected ? ' · connected' : g.enabled ? ' · on' : ' (PS4/PS5 controller)'}</summary>
       <div class="gyrobody">
-        <label><input type="checkbox" id="gyroOn" ${g.enabled ? 'checked' : ''}> enable gyro aiming <span class="k">(Chrome/Edge)</span></label>
+        <label><input type="checkbox" id="gyroOn" ${g.enabled ? 'checked' : ''}> enable gyro aiming <span class="k">(Chrome/Edge · browser permission once)</span></label>
         <label>gyro sensitivity <input type="range" id="gyroSens" min="25" max="300" step="5" value="${Math.round(g.sens * 100)}"><b id="gyroSensV">${Math.round(g.sens * 100)}%</b></label>
         <label><input type="checkbox" id="gyroInvX" ${g.invertX ? 'checked' : ''}> invert horizontal (yaw)</label>
         <label><input type="checkbox" id="gyroInvY" ${g.invertY ? 'checked' : ''}> invert vertical (pitch)</label>
-        <div class="gyrobtns"><button type="button" id="gyroConnect">${g.connected ? 'DISCONNECT' : 'CONNECT CONTROLLER'}</button><button type="button" id="gyroCal">RECENTER</button></div>
+        <div class="gyrobtns"><button type="button" id="gyroCal">RECENTER</button></div>
         <div class="gyrostatus" id="gyroStatus">${esc(gyroStatus(g))}</div>
       </div>
     </details>
@@ -637,35 +644,33 @@ function wireGyro(box) {
   const g = input.gyro, root = box.querySelector('#gyroBox'); if (!root) return;
   const on = root.querySelector('#gyroOn'), sens = root.querySelector('#gyroSens'), out = root.querySelector('#gyroSensV');
   const invX = root.querySelector('#gyroInvX'), invY = root.querySelector('#gyroInvY');
-  const conn = root.querySelector('#gyroConnect'), cal = root.querySelector('#gyroCal'), status = root.querySelector('#gyroStatus');
+  const cal = root.querySelector('#gyroCal'), status = root.querySelector('#gyroStatus');
   const sync = () => {
     if (!root.isConnected) return;
     on.checked = g.enabled;
     const pct = Math.round(g.sens * 100);
     sens.value = String(pct); out.textContent = pct + '%';
     invX.checked = g.invertX; invY.checked = g.invertY;
-    conn.textContent = g.connected ? 'DISCONNECT' : 'CONNECT CONTROLLER';
-    conn.disabled = !g.supported || g.state === 'connecting';
-    cal.disabled = !g.connected || !g.enabled || g.calibrating;
+    cal.disabled = !g.connected || !g.enabled || !g.hasMotionData || g.calibrating;
     status.textContent = gyroStatus(g);
-    root.querySelector('summary').textContent = 'gyro aiming' + (g.connected ? ' · connected' : g.enabled ? ' · on' : ' (DualSense)');
+    root.querySelector('summary').textContent = 'gyro aiming' + (g.connected ? ' · connected' : g.enabled ? ' · on' : ' (PS4/PS5 controller)');
   };
   g.onchange = sync;
+  input.onControllerChange = sync;
   on.addEventListener('change', async () => {
     g.enabled = on.checked; g.saveSettings();
-    if (!g.enabled) await g.disconnect();
-    else if (!g.connected) { try { await g.connect(); } catch { /* state holds the error */ } }
+    if (g.enabled && !g.connected) {
+      try {
+        // Reuse an existing browser grant silently. Only ask the browser to
+        // authorize the controller if this site has never been allowed to read it.
+        if (!await g.autoConnect()) await g.connect();
+      } catch { /* state holds the error */ }
+    }
     sync();
   });
   sens.addEventListener('input', () => { g.sens = Number(sens.value) / 100; out.textContent = sens.value + '%'; g.saveSettings(); });
   invX.addEventListener('change', () => { g.invertX = invX.checked; g.saveSettings(); });
   invY.addEventListener('change', () => { g.invertY = invY.checked; g.saveSettings(); });
-  conn.addEventListener('click', async () => {
-    if (g.connected) { await g.disconnect(); sync(); return; }
-    g.enabled = true; g.saveSettings(); on.checked = true;
-    try { await g.connect(); } catch { /* state holds the error */ }
-    sync();
-  });
   cal.addEventListener('click', () => { g.recenter(); sync(); });
   sync();
 }
@@ -886,6 +891,6 @@ function step(now) {
   else hud.setFocusMeter(playing && (w.kind === 'katana' || game.katanaStreak > 0 || game.focus.active), game.focus.active ? 1 : clamp(game.katanaStreak / KATANA_CHARGE_KILLS, 0, 1), game.focus.active, 'KATANA');
   if (game.boss) { if (game.boss.alive) hud.setBoss(game.boss.T.name, game.boss.hp / game.boss.maxHp); else { hud.setBoss(null, null); game.boss = null; } }
   audio.setIntensity(clamp((enemies.alive + game.queue.length + remote.size * 2) / 12, 0, 1) * (game.intermission > 0 ? 0.25 : 1));
-  R.render(game.time, { hurt: player.hurtFx, flash: player.flashFx, slow: scale < 1 ? 1 : 0, lowHp: player.alive && player.hp < 30 ? 1 - player.hp / 30 : 0 });
+  R.render(game.time, { hurt: player.hurtFx, flash: player.flashFx, slow: scale < 1 ? 1 : 0, lowHp: player.alive && player.hp < 30 ? 1 - player.hp / 30 : 0 }, dt * 1000);
 }
 requestAnimationFrame(tick);

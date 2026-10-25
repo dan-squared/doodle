@@ -226,6 +226,7 @@ export class InkRenderer {
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     this.renderer.autoClear = false;
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    this.qualityScale = 1; this.slowFrameTime = 0; this.steadyFrameTime = 0;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(80, 1, 0.08, 420);
     const depthTexture = new THREE.DepthTexture(2, 2); depthTexture.format = THREE.DepthFormat; depthTexture.type = THREE.FloatType;
@@ -248,13 +249,30 @@ export class InkRenderer {
   }
   resize() {
     const w = Math.max(2, window.innerWidth), h = Math.max(2, window.innerHeight);
-    this.renderer.setPixelRatio(this.pixelRatio); this.renderer.setSize(w, h, false);
-    const rw = Math.floor(w * this.pixelRatio), rh = Math.floor(h * this.pixelRatio);
+    const ratio = this.pixelRatio * this.qualityScale;
+    this.renderer.setPixelRatio(ratio); this.renderer.setSize(w, h, false);
+    const rw = Math.floor(w * ratio), rh = Math.floor(h * ratio);
     this.rt.setSize(rw, rh);
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
     const u = this.post.uniforms; u.uRes.value.set(rw, rh); u.uAspect.value = w / h; u.uLineSpacing.value = rh / 13.5;
   }
-  render(time, fx = {}) {
+  _adaptResolution(frameMs) {
+    if (document.hidden || !Number.isFinite(frameMs)) { this.slowFrameTime = 0; this.steadyFrameTime = 0; return; }
+    const elapsed = Math.min(frameMs, 50) / 1000;
+    if (frameMs > 21) { this.slowFrameTime += elapsed; this.steadyFrameTime = 0; }
+    else if (frameMs < 17.5) { this.steadyFrameTime += elapsed; this.slowFrameTime = Math.max(0, this.slowFrameTime - elapsed); }
+    else { this.slowFrameTime = Math.max(0, this.slowFrameTime - elapsed * 0.5); this.steadyFrameTime = 0; }
+
+    let nextScale = this.qualityScale;
+    if (this.slowFrameTime >= 0.75 && this.qualityScale > 0.7) {
+      nextScale = Math.max(0.7, this.qualityScale - 0.1); this.slowFrameTime = 0;
+    } else if (this.steadyFrameTime >= 6 && this.qualityScale < 1) {
+      nextScale = Math.min(1, this.qualityScale + 0.05); this.steadyFrameTime = 0;
+    }
+    if (nextScale !== this.qualityScale) { this.qualityScale = nextScale; this.resize(); }
+  }
+  render(time, fx = {}, frameMs = 16.67) {
+    this._adaptResolution(frameMs);
     shared.uTime.value = time;
     this.camera.updateMatrixWorld(); this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
     shared.uLightDir.value.copy(LIGHT_WORLD).transformDirection(this.camera.matrixWorldInverse);

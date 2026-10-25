@@ -106,7 +106,7 @@ export const CONTROLS_HTML = `
     <div><b>Both mouse buttons</b> dash-slash once the gauge is lit</div>
     <div><b>1-4 / wheel</b> rifle · shotgun · sniper · katana</div>
   </div>
-  <div><div class="colhead">PS5 CONTROLLER</div>
+  <div><div class="colhead">PS4 / PS5 CONTROLLER</div>
     <div><b>L stick</b> move &nbsp; <b>R stick</b> look &nbsp; <b>L3</b> sprint</div>
     <div><b>R2</b> fire / slash &nbsp; <b>L2</b> aim / block</div>
     <div><b>✕</b> jump &nbsp; <b>○</b> slide · air dash</div>

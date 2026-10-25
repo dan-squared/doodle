@@ -19,7 +19,8 @@ then open http://127.0.0.1:8910. On Vercel (or any static host) just deploy the 
 
 ## Gyro aiming
 
-A PS5 DualSense (or DualSense Edge) can aim with its gyroscope in Chrome or Edge. Open
+A PS4 DualShock 4 (CUH-ZCT1 or CUH-ZCT2), PS5 DualSense, or DualSense Edge can aim
+with its gyroscope in Chrome or Edge. Open
 **Settings → gyro aiming**, tick **enable gyro aiming**, and pick the controller in the browser's
 device chooser. WebHID only works on `localhost` or an HTTPS page, so use `http://127.0.0.1:8910`
 rather than a plain-HTTP LAN address.

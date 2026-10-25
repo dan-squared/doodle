@@ -24,12 +24,15 @@ export class Input {
     this.usingGamepad = false; this.gamepadIndex = -1; this.padHoldTime = 0;
     this.pointerLocked = false; this.anyInput = false; this.lastPadButtons = [];
     this.onLockChange = null; this.onAnyInput = null; this.lastActive = performance.now();
-    this.invertY = false; this.onDeviceChange = null;
+    this.invertY = false; this.onDeviceChange = null; this.onControllerChange = null;
     // WebHID gyro aiming (Chrome/Edge). The module also exposes sticks/buttons
     // from the HID reports, used only if WebHID hides the pad from the Gamepad API.
     this.gyro = new GyroInput();
     this.gyro.loadSettings();
-    if (this.gyro.enabled) this.gyro.autoConnect();
+    // WebHID only exposes devices previously approved by the user. Watch for
+    // those in the background; the Gamepad API remains the source for ordinary
+    // movement and lets us retry as soon as a controller is connected.
+    this.gyro.autoConnect();
 
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
@@ -62,7 +65,15 @@ export class Input {
       this.pointerLocked = document.pointerLockElement === this.canvas;
       if (this.onLockChange) this.onLockChange(this.pointerLocked);
     });
-    window.addEventListener('gamepadconnected', (e) => { this.gamepadIndex = e.gamepad.index; });
+    window.addEventListener('gamepadconnected', (e) => {
+      this.gamepadIndex = e.gamepad.index;
+      if (this.gyro.enabled) this.gyro.autoConnect();
+      if (this.onControllerChange) this.onControllerChange(true);
+    });
+    window.addEventListener('gamepaddisconnected', (e) => {
+      if (this.gamepadIndex === e.gamepad.index) this.gamepadIndex = -1;
+      if (this.onControllerChange) this.onControllerChange(this.controllerConnected);
+    });
   }
 
   // browsers refuse a new pointer lock for about a second after Esc released the last one, so a
@@ -78,10 +89,12 @@ export class Input {
 
   _getPad() {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    if (this.gamepadIndex >= 0 && pads[this.gamepadIndex]) return pads[this.gamepadIndex];
+    if (this.gamepadIndex >= 0 && pads[this.gamepadIndex] && pads[this.gamepadIndex].connected) return pads[this.gamepadIndex];
     for (const p of pads) if (p && p.connected) { this.gamepadIndex = p.index; return p; }
     return null;
   }
+
+  get controllerConnected() { return !!this._getPad(); }
 
   update(dt) {
     // rotate button states

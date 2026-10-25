@@ -7,13 +7,13 @@ const _min = new THREE.Vector3(), _max = new THREE.Vector3(), _out = [];
 
 export class World {
   constructor(cell = 8) {
-    this.boxes = []; this.cell = cell; this.grid = new Map(); this._qid = 0;
+    this.boxes = []; this.cell = cell; this.grid = new Map(); this._qid = 0; this._nextOrder = 0;
     this.bounds = { min: new THREE.Vector3(-60, -20, -60), max: new THREE.Vector3(60, 80, 60) };
   }
   // wipe the world so a different map can be built into the same instance
-  clear() { this.boxes.length = 0; this.grid.clear(); this._qid = 0; }
+  clear() { this.boxes.length = 0; this.grid.clear(); this._qid = 0; this._nextOrder = 0; }
   addBox(min, max, data = {}) {
-    const b = { min: { x: min.x, y: min.y, z: min.z }, max: { x: max.x, y: max.y, z: max.z }, data, id: this.boxes.length, _q: -1 };
+    const b = { min: { x: min.x, y: min.y, z: min.z }, max: { x: max.x, y: max.y, z: max.z }, data, id: this.boxes.length, _order: this._nextOrder++, _q: -1 };
     this.boxes.push(b); return b;
   }
   finalize() { this.grid.clear(); for (const b of this.boxes) this._insert(b); }
@@ -129,22 +129,54 @@ export class World {
 
   // Ray vs all boxes (slab test). Returns {dist, point, normal, box} or null.
   raycast(o, d, maxDist = 1000, ignore = null) {
-    let best = null, bestT = maxDist, bAxis = -1, bSign = 0;
-    const boxes = this.boxes;
-    for (let i = 0; i < boxes.length; i++) {
-      const b = boxes[i]; if (ignore && ignore(b)) continue;
-      let tmin = 0, tmax = bestT, nAxis = -1, nSign = 0, ok = true;
-      for (let a = 0; a < 3; a++) {
-        const ax = AX[a]; const da = d[ax], oa = o[ax];
-        if (Math.abs(da) < 1e-9) { if (oa < b.min[ax] || oa > b.max[ax]) { ok = false; break; } continue; }
-        const inv = 1 / da; let t1 = (b.min[ax] - oa) * inv, t2 = (b.max[ax] - oa) * inv, sign = -1;
-        if (t1 > t2) { const t = t1; t1 = t2; t2 = t; sign = 1; }
-        if (t1 > tmin) { tmin = t1; nAxis = a; nSign = sign; }
-        if (t2 < tmax) tmax = t2;
-        if (tmin > tmax) { ok = false; break; }
+    let best = null, bestT = maxDist, bestOrder = Infinity, bAxis = -1, bSign = 0;
+    const c = this.cell, stepX = Math.sign(d.x), stepZ = Math.sign(d.z);
+    let ix = Math.floor(o.x / c), iz = Math.floor(o.z / c);
+    const tDeltaX = stepX ? c / Math.abs(d.x) : Infinity;
+    const tDeltaZ = stepZ ? c / Math.abs(d.z) : Infinity;
+    let tMaxX = stepX > 0 ? ((ix + 1) * c - o.x) / d.x : stepX < 0 ? (ix * c - o.x) / d.x : Infinity;
+    let tMaxZ = stepZ > 0 ? ((iz + 1) * c - o.z) / d.z : stepZ < 0 ? (iz * c - o.z) / d.z : Infinity;
+    const q = ++this._qid;
+    const testCell = (cx, cz) => {
+      const bucket = this.grid.get(this._key(cx, cz)); if (!bucket) return;
+      for (let i = 0; i < bucket.length; i++) {
+        const b = bucket[i]; if (b._q === q) continue; b._q = q;
+        if (ignore && ignore(b)) continue;
+        let tmin = 0, tmax = bestT, nAxis = -1, nSign = 0, ok = true;
+        for (let a = 0; a < 3; a++) {
+          const ax = AX[a]; const da = d[ax], oa = o[ax];
+          if (Math.abs(da) < 1e-9) { if (oa < b.min[ax] || oa > b.max[ax]) { ok = false; break; } continue; }
+          const inv = 1 / da; let t1 = (b.min[ax] - oa) * inv, t2 = (b.max[ax] - oa) * inv, sign = -1;
+          if (t1 > t2) { const t = t1; t1 = t2; t2 = t; sign = 1; }
+          if (t1 > tmin) { tmin = t1; nAxis = a; nSign = sign; }
+          if (t2 < tmax) tmax = t2;
+          if (tmin > tmax) { ok = false; break; }
+        }
+        if (!ok || nAxis < 0) continue;
+        // Keep the same deterministic winner for coplanar/overlapping boxes regardless of
+        // which grid cell first exposed them. Tiny float differences at shared faces count as ties.
+        if (tmin < bestT - 1e-8 || (best && Math.abs(tmin - bestT) <= 1e-8 && b._order < bestOrder)) {
+          best = b; bestT = tmin; bestOrder = b._order; bAxis = nAxis; bSign = nSign;
+        }
       }
-      if (!ok || nAxis < 0) continue;
-      if (tmin < bestT) { best = b; bestT = tmin; bAxis = nAxis; bSign = nSign; }
+    };
+    // Walk only the X/Z grid cells crossed by the ray. Boxes are inserted into every
+    // cell their footprint spans, so long walls and vertical casts remain covered.
+    let entryT = 0;
+    while (entryT <= maxDist && entryT <= bestT) {
+      testCell(ix, iz);
+      if (tMaxX === tMaxZ) {
+        if (tMaxX > maxDist || tMaxX > bestT) break;
+        // Include both side cells at exact grid corners; a box can touch the ray there.
+        testCell(ix + stepX, iz); testCell(ix, iz + stepZ);
+        ix += stepX; iz += stepZ; entryT = tMaxX; tMaxX += tDeltaX; tMaxZ += tDeltaZ;
+      } else if (tMaxX < tMaxZ) {
+        if (tMaxX > maxDist || tMaxX > bestT) break;
+        ix += stepX; entryT = tMaxX; tMaxX += tDeltaX;
+      } else {
+        if (tMaxZ > maxDist || tMaxZ > bestT) break;
+        iz += stepZ; entryT = tMaxZ; tMaxZ += tDeltaZ;
+      }
     }
     if (!best) return null;
     const point = new THREE.Vector3(o.x + d.x * bestT, o.y + d.y * bestT, o.z + d.z * bestT);
