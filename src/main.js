@@ -48,6 +48,19 @@ let musicWanted = localStorage.getItem('doodle_music') !== '0';
 let checkpoint = Number(localStorage.getItem('doodle_checkpoint') || 0);
 let myName = (localStorage.getItem('doodle_name') || '').slice(0, 14) || 'doodle' + Math.floor(Math.random() * 90 + 10);
 const settings = { sens: Number(localStorage.getItem('doodle_sens') || 100), invert: localStorage.getItem('doodle_invert') === '1' };
+const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+function syncFullscreenButton() {
+  const button = hud.el.panel.querySelector('#fullscreenToggle');
+  if (!button) return;
+  const available = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen);
+  button.disabled = !available;
+  button.textContent = fullscreenElement() ? 'EXIT FULLSCREEN' : 'ENTER FULLSCREEN';
+  button.setAttribute('aria-pressed', String(!!fullscreenElement()));
+  const status = hud.el.panel.querySelector('#fullscreenStatus');
+  if (status && !available) status.textContent = 'fullscreen is not supported in this browser';
+}
+document.addEventListener('fullscreenchange', syncFullscreenButton);
+document.addEventListener('webkitfullscreenchange', syncFullscreenButton);
 function applySettings() {
   input.mouseSens = 0.0022 * settings.sens / 100; input.padSensX = 3.4 * settings.sens / 100; input.padSensY = 2.6 * settings.sens / 100; input.invertY = settings.invert;
   localStorage.setItem('doodle_sens', String(settings.sens)); localStorage.setItem('doodle_invert', settings.invert ? '1' : '0');
@@ -618,6 +631,7 @@ function settingsHTML() {
     <label>look sensitivity <input type="range" id="setSens" min="25" max="250" step="5" value="${settings.sens}"><b id="setSensV">${settings.sens}%</b></label>
     <label><input type="checkbox" id="setInv" ${settings.invert ? 'checked' : ''}> invert vertical look</label>
     <label><input type="checkbox" id="setMus" ${musicWanted ? 'checked' : ''}> music <span class="k">(M)</span></label>
+    <div class="fullscreen-row"><button type="button" class="fullscreen-btn" id="fullscreenToggle" aria-pressed="${!!fullscreenElement()}">ENTER FULLSCREEN</button><span id="fullscreenStatus" class="fullscreen-status" aria-live="polite"></span></div>
     <details class="gyro" id="gyroBox">
       <summary>gyro aiming${g.connected ? ' · connected' : g.enabled ? ' · on' : ' (PS4/PS5 controller)'}</summary>
       <div class="gyrobody">
@@ -634,6 +648,25 @@ function settingsHTML() {
 function wireSettings() {
   const box = hud.el.panel.querySelector('#settings'); if (!box) return;
   box.addEventListener('click', (e) => e.stopPropagation()); box.addEventListener('keydown', (e) => e.stopPropagation());
+  const fullscreen = box.querySelector('#fullscreenToggle');
+  fullscreen.addEventListener('click', async () => {
+    const status = box.querySelector('#fullscreenStatus');
+    status.textContent = '';
+    try {
+      if (fullscreenElement()) {
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        if (exit) await exit.call(document);
+      } else {
+        const root = document.documentElement;
+        const enter = root.requestFullscreen || root.webkitRequestFullscreen;
+        if (enter) await enter.call(root);
+      }
+    } catch {
+      status.textContent = 'fullscreen was blocked by the browser';
+    }
+    syncFullscreenButton();
+  });
+  syncFullscreenButton();
   const sens = box.querySelector('#setSens'), out = box.querySelector('#setSensV');
   sens.addEventListener('input', () => { settings.sens = Number(sens.value); out.textContent = settings.sens + '%'; applySettings(); });
   box.querySelector('#setInv').addEventListener('change', (e) => { settings.invert = e.target.checked; applySettings(); });
