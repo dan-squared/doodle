@@ -63,7 +63,16 @@ export class Input {
     document.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
     document.addEventListener('pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === this.canvas;
+      if (this.pointerLocked) clearTimeout(this._lockErrorTimer);
+      // A late browser response must not recapture the mouse after the player
+      // has switched to a controller or explicitly left pointer lock.
+      if (this.pointerLocked && (this.usingGamepad || !this.wantLock)) document.exitPointerLock();
       if (this.onLockChange) this.onLockChange(this.pointerLocked);
+    });
+    document.addEventListener('pointerlockerror', () => {
+      // Some browsers report lock failures only through this event. Delay the
+      // notice briefly so an unsupported raw-mouse request can fall back first.
+      this._scheduleLockError();
     });
     window.addEventListener('gamepadconnected', (e) => {
       this.gamepadIndex = e.gamepad.index;
@@ -76,16 +85,55 @@ export class Input {
     });
   }
 
-  // browsers refuse a new pointer lock for about a second after Esc released the last one, so a
-  // failed request is retried until it takes or the game stops wanting it
   requestLock() {
-    this.wantLock = true; if (this.pointerLocked) return;
-    const attempt = (opts) => { try { const p = this.canvas.requestPointerLock(opts); return p && p.catch ? p : Promise.resolve(); } catch (err) { return Promise.reject(err); } };
-    attempt({ unadjustedMovement: true }).catch(() => attempt()).catch(() => {
-      clearTimeout(this._lockRetry); this._lockRetry = setTimeout(() => { if (this.wantLock && !this.pointerLocked) this.requestLock(); }, 1200);
-    });
+    // Controller and gyro input do not need pointer lock. In particular, don't
+    // let a mouse-lock retry steal focus while a DualShock is the active device.
+    if (this.usingGamepad) return;
+    this.wantLock = true;
+    if (this.pointerLocked || this._lockPending) return;
+
+    const attempt = (options) => {
+      try {
+        const result = this.canvas.requestPointerLock(options);
+        // Older implementations return void and communicate through events.
+        return result && typeof result.then === 'function' ? result : Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+
+    this._lockPending = true;
+    attempt({ unadjustedMovement: true })
+      .catch((error) => {
+        // Raw/unadjusted movement is optional. Retry standard lock only for the
+        // specific unsupported-option failure, while the original click's
+        // activation is still available.
+        if (error && error.name === 'NotSupportedError') {
+          if (!this.wantLock || this.usingGamepad) return undefined;
+          return attempt();
+        }
+        throw error;
+      })
+      .catch((error) => this._scheduleLockError(error))
+      .finally(() => { this._lockPending = false; });
   }
-  exitLock() { this.wantLock = false; clearTimeout(this._lockRetry); if (document.pointerLockElement) document.exitPointerLock(); }
+  _scheduleLockError(error) {
+    clearTimeout(this._lockErrorTimer);
+    this._lockErrorTimer = setTimeout(() => {
+      if (this._lockPending) {
+        this._scheduleLockError(error);
+        return;
+      }
+      if (!this.wantLock || this.pointerLocked || this.usingGamepad) return;
+      if (this.onLockError) this.onLockError(error || null);
+    }, 250);
+  }
+
+  exitLock() {
+    this.wantLock = false;
+    clearTimeout(this._lockErrorTimer);
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
 
   _getPad() {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -146,7 +194,14 @@ export class Input {
         gyroActive = true;
       }
     }
-    if (padActive || gyroActive) { if (!this.usingGamepad && this.onDeviceChange) this.onDeviceChange(true); this.usingGamepad = true; this.anyInput = true; this.lastActive = performance.now(); }
+    if (padActive || gyroActive) {
+      if (!this.usingGamepad) {
+        if (this.onDeviceChange) this.onDeviceChange(true);
+        this.usingGamepad = true;
+        this.exitLock();
+      }
+      this.anyInput = true; this.lastActive = performance.now();
+    }
     this.padPrev = this.padState; this.padState = padS;
 
     const ml = Math.hypot(mx, my); if (ml > 1) { mx /= ml; my /= ml; }
